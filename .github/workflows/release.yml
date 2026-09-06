@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+      - name: Tests
+        run: python -m pytest -q tests
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (python -c "import sys; sys.path.insert(0,'src'); import utter; print(utter.__version__)").Trim()
+          "version=$v" >> $env:GITHUB_OUTPUT
+      - name: PyInstaller
+        run: pyinstaller --noconfirm --clean packaging/utter.spec
+      - name: Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ steps.ver.outputs.version }} packaging\installer.iss
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\Utter\* -DestinationPath dist\Utter-${{ steps.ver.outputs.version }}-portable-win64.zip
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: utter-windows
+          path: |
+            dist/Utter-*-Setup.exe
+            dist/Utter-*-portable-win64.zip
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/Utter-*-Setup.exe
+            dist/Utter-*-portable-win64.zip
+          generate_release_notes: true
