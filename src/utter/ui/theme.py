@@ -1,4 +1,4 @@
-"""Dark, minimal Qt stylesheet in the spirit of Handy's UI."""
+"""Utter's dark, minimal Qt stylesheet."""
 
 ACCENT = "#7c8cff"
 ACCENT_HOVER = "#93a0ff"

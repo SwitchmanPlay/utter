@@ -9,7 +9,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from utter.models.registry import ModelSpec, resolve_files
+from utter.models.registry import ModelSpec, pocket_voice_files, resolve_files
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +72,26 @@ class Engine:
             if "dict_dir" in f:
                 kw["dict_dir"] = f["dict_dir"]
             model_cfg_kwargs["kokoro"] = sherpa_onnx.OfflineTtsKokoroModelConfig(**kw)
+        elif self.spec.family == "kitten":
+            cls = getattr(sherpa_onnx, "OfflineTtsKittenModelConfig", None)
+            if cls is None:
+                raise EngineError("This sherpa-onnx build has no KittenTTS support. Run: pip install -U sherpa-onnx")
+            model_cfg_kwargs["kitten"] = cls(
+                model=f["model"], voices=f["voices"], tokens=f["tokens"], data_dir=f["data_dir"]
+            )
+        elif self.spec.family == "pocket":
+            cls = getattr(sherpa_onnx, "OfflineTtsPocketModelConfig", None)
+            if cls is None:
+                raise EngineError("This sherpa-onnx build has no Pocket TTS support. Run: pip install -U sherpa-onnx")
+            model_cfg_kwargs["pocket"] = cls(
+                lm_flow=f["lm_flow"],
+                lm_main=f["lm_main"],
+                encoder=f["encoder"],
+                decoder=f["decoder"],
+                text_conditioner=f["text_conditioner"],
+                vocab_json=f["vocab_json"],
+                token_scores_json=f["token_scores_json"],
+            )
         elif self.spec.family == "vits":
             model_cfg_kwargs["vits"] = sherpa_onnx.OfflineTtsVitsModelConfig(
                 model=f["model"],
@@ -114,7 +134,13 @@ class Engine:
         speed: float = 1.0,
         lang: str = "en",
         num_steps: int = 8,
+        reference_audio: str = "",
     ) -> Audio:
+        """Synthesize one chunk.
+
+        `reference_audio` is only used by voice-cloning families (Pocket TTS): a path to a
+        mono WAV of the voice to imitate. Empty -> the bundled voice selected by `speaker_id`.
+        """
         if not text.strip():
             return Audio(np.zeros(0, dtype=np.float32), self.sample_rate or 24000)
         self.load()
@@ -133,6 +159,11 @@ class Engine:
                         gc.extra["lang"] = lang
                     except Exception:  # very old wheels without `extra`
                         pass
+                elif self.spec.family == "pocket":
+                    ref = self._pocket_reference(reference_audio, sid)
+                    gc.reference_audio = ref.samples
+                    gc.reference_sample_rate = ref.sample_rate
+                    gc.num_steps = max(1, min(int(num_steps), 8))
                 result = self._tts.generate(text, gc)
             else:  # legacy API (sherpa-onnx < 1.12)
                 result = self._tts.generate(text, sid=sid, speed=float(speed))
@@ -141,6 +172,56 @@ class Engine:
         if samples.ndim > 1:
             samples = samples.reshape(-1)
         return Audio(samples, int(result.sample_rate))
+
+
+    # ---- voice cloning helpers ------------------------------------------
+    _ref_cache: dict[str, Audio] = {}
+
+    def _pocket_reference(self, reference_audio: str, sid: int) -> Audio:
+        """Load (and cache) the reference voice WAV for Pocket TTS."""
+        path = reference_audio.strip()
+        if not path:
+            wavs = pocket_voice_files(self.spec.install_dir)
+            if not wavs:
+                raise EngineError("Pocket TTS needs a reference voice WAV, but none were found in the model folder.")
+            path = str(wavs[min(sid, len(wavs) - 1)])
+        cached = self._ref_cache.get(path)
+        if cached is not None:
+            return cached
+        audio = read_wav(path)
+        if audio.duration < 1.0:
+            raise EngineError(f"Reference voice '{path}' is too short (need at least ~1 s of clean speech).")
+        if audio.duration > 30.0:  # cloning quality plateaus early; keep prompt short and fast
+            audio = Audio(audio.samples[: int(30.0 * audio.sample_rate)], audio.sample_rate)
+        self._ref_cache[path] = audio
+        return audio
+
+
+def read_wav(path: str) -> Audio:
+    """Read a WAV file as float32 mono. Prefers sherpa-onnx's reader, falls back to the stdlib."""
+    try:
+        import sherpa_onnx
+
+        samples, sr = sherpa_onnx.read_wave(path)
+        return Audio(np.asarray(samples, dtype=np.float32).reshape(-1), int(sr))
+    except Exception:
+        pass
+    import wave
+
+    with wave.open(path, "rb") as w:
+        n, ch, width, sr = w.getnframes(), w.getnchannels(), w.getsampwidth(), w.getframerate()
+        raw = w.readframes(n)
+    if width == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif width == 4:
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    elif width == 1:
+        data = (np.frombuffer(raw, dtype=np.uint8).astype(np.float32) - 128.0) / 128.0
+    else:
+        raise EngineError(f"Unsupported WAV sample width {width * 8} bit in '{path}'. Use 16-bit PCM.")
+    if ch > 1:
+        data = data.reshape(-1, ch).mean(axis=1)
+    return Audio(np.ascontiguousarray(data, dtype=np.float32), int(sr))
 
 
 class EngineCache:

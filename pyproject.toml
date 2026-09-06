@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "utter"
-version = "0.1.0"
-description = "Handy, but for text-to-speech. Select text, press a hotkey, hear it. 100% local."
+version = "0.2.0"
+description = "Select it. Hear it. Any text on your screen, spoken aloud by local neural voices. 100% offline."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"

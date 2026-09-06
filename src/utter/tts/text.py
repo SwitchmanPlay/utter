@@ -24,6 +24,19 @@ _HR_RE = re.compile(r"^\s*(?:-{3,}|\*{3,}|_{3,})\s*$", re.M)
 _HTML_TAG_RE = re.compile(r"<[^>\n]{1,80}>")
 _MULTI_SPACE_RE = re.compile(r"[ \t\u00a0]{2,}")
 _MULTI_NL_RE = re.compile(r"\n{3,}")
+_EMPTY_BRACKETS_RE = re.compile(r"\s*[(\[{]\s*[)\]}]")
+_REF_BRACKET_RE = re.compile(r"\s*\[(?:\d+|[a-z]|\^[\w-]{1,24}|citation needed)(?:\s*[,;\u2013-]\s*(?:\d+|[a-z]))*\]")  # [1], [12, 13], [a], [^note]
+_PAREN_RE = re.compile(r"\s*\(\s*([^()\n]{1,400}?)\s*\)")
+_SQUARE_RE = re.compile(r"\s*\[\s*([^\[\]\n]{1,400}?)\s*\]")
+_CURLY_RE = re.compile(r"\s*\{\s*([^{}\n]{1,400}?)\s*\}")
+_STRAY_BRACKET_RE = re.compile(r"[()\[\]{}]")
+_ARROW_RE = re.compile(r"\s*(?:->|=>|\u2192|\u21d2|\u27a1)\s*")
+_REPEAT_PUNCT_RE = re.compile(r"([!?])\1{1,}")
+_COMMA_FIX_RE = re.compile(r"\s+,")
+_DOUBLE_COMMA_RE = re.compile(r",(?:\s*,)+")
+_COMMA_BEFORE_END_RE = re.compile(r",\s*([.!?;:\u2026])")
+_COMMA_AFTER_END_RE = re.compile(r"([.!?;:\u2026])\s*,\s*")
+_LEADING_COMMA_RE = re.compile(r"^\s*,\s*", re.M)
 _EMOJI_RE = re.compile(
     "["
     "\U0001F300-\U0001FAFF"  # symbols & pictographs, emoticons, transport, etc.
@@ -44,7 +57,7 @@ def clean_text(text: str, *, strip_markdown: bool = True, urls: str = "link") ->
     t = text.replace("\r\n", "\n").replace("\r", "\n")
 
     if strip_markdown:
-        t = _FENCE_RE.sub(" (code block omitted) ", t)
+        t = _FENCE_RE.sub(" — code block omitted — ", t)
         t = _IMAGE_RE.sub(lambda m: m.group(1) or "", t)
         t = _LINK_RE.sub(r"\1", t)
         t = _INLINE_CODE_RE.sub(r"\1", t)
@@ -65,11 +78,36 @@ def clean_text(text: str, *, strip_markdown: bool = True, urls: str = "link") ->
         t = _URL_RE.sub("", t)
 
     t = _EMOJI_RE.sub("", t)
+    t = speakable_punctuation(t)
     t = _MULTI_SPACE_RE.sub(" ", t)
     t = _MULTI_NL_RE.sub("\n\n", t)
     # strip trailing spaces per line
     t = "\n".join(line.strip() for line in t.split("\n"))
     return t.strip()
+
+
+def speakable_punctuation(t: str) -> str:
+    """Turn brackets and arrows into pauses.
+
+    TTS models either read "(" literally, swallow the bracketed text, or garble the prosody.
+    "Supertonic (a TTS model) is fast" -> "Supertonic, a TTS model, is fast".
+    Citation-style "[1]" / "[12, 13]" markers are removed altogether.
+    """
+    t = _EMPTY_BRACKETS_RE.sub("", t)
+    t = _REF_BRACKET_RE.sub("", t)
+    for _ in range(2):  # two passes unwrap one level of nesting: (a (b) c)
+        t = _PAREN_RE.sub(r", \1, ", t)
+        t = _SQUARE_RE.sub(r", \1, ", t)
+        t = _CURLY_RE.sub(r", \1, ", t)
+    t = _STRAY_BRACKET_RE.sub(" ", t)
+    t = _ARROW_RE.sub(", ", t)
+    t = _REPEAT_PUNCT_RE.sub(r"\1", t)
+    t = _COMMA_FIX_RE.sub(",", t)
+    t = _DOUBLE_COMMA_RE.sub(",", t)
+    t = _COMMA_BEFORE_END_RE.sub(r"\1", t)
+    t = _COMMA_AFTER_END_RE.sub(r"\1 ", t)
+    t = _LEADING_COMMA_RE.sub("", t)
+    return t
 
 
 # --------------------------------------------------------------------------- chunking
@@ -192,6 +230,67 @@ _PL_MARKERS = set("ąęłńśźżĄĘŁŃŚŹŻ")
 class LangGuess:
     code: str
     confidence: float  # 0..1, heuristic only
+
+
+_SLAVIC = ("ru", "uk")
+
+
+def assign_languages(
+    chunks: list[str],
+    *,
+    fixed: str | None = None,
+    default: str = "en",
+    allowed: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Pick one language per chunk, with memory.
+
+    The old per-chunk detection had a nasty failure mode: a chunk like "2026." or "Nr. 5"
+    has no letters, the heuristic returned the default with confidence 0, and the model
+    switched to English mid-paragraph. Now:
+
+    - a fixed language (settings.language != "auto") wins for every chunk;
+    - otherwise the whole text is classified once to get the document language;
+    - a chunk only switches language when it has enough letters *and* the guess is
+      confident, or when the script changes (Latin <-> Cyrillic). Short / numeric /
+      ambiguous chunks inherit the previous chunk's language;
+    - the result is clamped to `allowed` (the model's language list) when given.
+    """
+    if fixed and fixed != "auto":
+        return [fixed] * len(chunks)
+    if not chunks:
+        return []
+
+    doc = detect_language(" ".join(chunks), default=default)
+    doc_lang = doc.code if doc.confidence > 0 else default
+    # Script-aware fallbacks: an ambiguous Latin chunk after Cyrillic text must not
+    # inherit "uk" (Supertonic would then read English with a Ukrainian G2P).
+    latin_fallback = doc_lang if doc_lang not in _SLAVIC else (default if default not in _SLAVIC else "en")
+    cyrillic_fallback = doc_lang if doc_lang in _SLAVIC else (default if default in _SLAVIC else "ru")
+    prev = doc_lang
+    out: list[str] = []
+    for chunk in chunks:
+        cyr = len(_CYRILLIC_RE.findall(chunk))
+        lat = len(_LATIN_RE.findall(chunk))
+        if cyr + lat < 12:
+            lang = prev  # numbers, bullets, "Ok." -> keep going in the same language
+        elif cyr > lat:
+            # Cyrillic chunk: switch if we were in a Latin language, else only on a clear uk/ru signal
+            guess = detect_language(chunk, default=prev if prev in _SLAVIC else cyrillic_fallback)
+            lang = guess.code if prev not in _SLAVIC or guess.confidence >= 0.6 else prev
+        else:
+            # Latin chunk: switch if we were in Cyrillic, else only on a reasonably confident guess
+            guess = detect_language(chunk, default=prev if prev not in _SLAVIC else latin_fallback)
+            lang = guess.code if prev in _SLAVIC or guess.confidence >= 0.34 else prev
+        if allowed and lang not in allowed:
+            if doc_lang in allowed:
+                lang = doc_lang
+            elif "en" in allowed:
+                lang = "en"
+            else:
+                lang = allowed[0]
+        out.append(lang)
+        prev = lang
+    return out
 
 
 def detect_language(text: str, default: str = "en") -> LangGuess:

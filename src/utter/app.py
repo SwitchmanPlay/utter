@@ -60,6 +60,7 @@ class UtterApp(QObject):
         self.hotkeys = HotkeyManager()
         self._bridge = _HotkeyBridge()
         self._settings_dialog: SettingsDialog | None = None
+        self._current_text: str = ""
         self._saved_clip: str | None = None
         self._wire()
         self.apply_hotkeys()
@@ -74,6 +75,7 @@ class UtterApp(QObject):
         spec = self.current_model()
         if spec is not None:
             QTimer.singleShot(300, lambda: self.speaker.preload(spec, self.settings))
+            QTimer.singleShot(1200, self._maybe_ask_autostart)
         else:
             QTimer.singleShot(400, self._first_run)
 
@@ -98,7 +100,7 @@ class UtterApp(QObject):
 
         o.pause_clicked.connect(s.toggle_pause)
         o.stop_clicked.connect(s.stop)
-        o.open_clicked.connect(self.window.show_and_raise)
+        o.open_clicked.connect(self._open_from_overlay)
 
         s.state_changed.connect(t.on_state)
         s.state_changed.connect(o.on_state)
@@ -109,6 +111,15 @@ class UtterApp(QObject):
         self._wav_done.connect(lambda p: self.window.set_status(f"Saved {os.path.basename(p)}"))
         self._wav_failed.connect(self.window.show_error)
         self.qapp.aboutToQuit.connect(self._shutdown)
+
+    def _open_from_overlay(self) -> None:
+        """Overlay's 'Open' button: dismiss the mini player and bring the editor to the front."""
+        self.overlay.hide()
+        # Text spoken via hotkey/clipboard never touched the text pad; show it there so the
+        # user can see, edit or re-read what is currently playing.
+        if self._current_text and self.window.text.toPlainText() != self._current_text:
+            self.window.text.setPlainText(self._current_text)
+        self.window.show_and_raise()
 
     # ---- helpers ----------------------------------------------------------
     def current_model(self) -> ModelSpec | None:
@@ -136,6 +147,35 @@ class UtterApp(QObject):
         if box.exec() == QMessageBox.StandardButton.Open:
             self.open_settings("models")
 
+    def _maybe_ask_autostart(self) -> None:
+        """Once, after the first successful setup: offer to start with Windows."""
+        s = self.settings
+        if s.asked_autostart or sys.platform != "win32":
+            return
+        if s.launch_at_login or _autostart_registered():
+            # installer task or an older settings file already took care of it
+            s.asked_autostart = True
+            s.launch_at_login = True
+            s.save()
+            return
+        self.window.show_and_raise()
+        box = QMessageBox(self.window)
+        box.setWindowTitle(f"Start {APP_NAME} with Windows?")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setText(
+            f"<b>Launch {APP_NAME} when you sign in?</b><br><br>"
+            "It waits quietly in the tray so the hotkeys work right away. "
+            "You can change this any time in Settings → General."
+        )
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText("Yes, start with Windows")
+        box.button(QMessageBox.StandardButton.No).setText("Not now")
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+        s.launch_at_login = box.exec() == QMessageBox.StandardButton.Yes
+        s.asked_autostart = True
+        s.save()
+        self._apply_autostart()
+
     # ---- speaking ---------------------------------------------------------
     def speak(self, text: str) -> None:
         spec = self.current_model()
@@ -145,6 +185,7 @@ class UtterApp(QObject):
         if not self.speaker.speak(text, spec, self.settings):
             self.window.set_status("Nothing to read.")
             return
+        self._current_text = text
         if self.settings.show_overlay and not self.window.isActiveWindow():
             self.overlay.show_near_cursor()
 
@@ -211,18 +252,24 @@ class UtterApp(QObject):
                 import numpy as np
 
                 from utter.tts.engine import Audio
-                from utter.tts.speaker import write_wav
-                from utter.tts.text import chunk_text, clean_text, detect_language
+                from utter.tts.speaker import plan_languages, prepare_chunk, write_wav
+                from utter.tts.text import chunk_text, clean_text
 
                 eng = self.engines.get(spec, s.num_threads)
                 eng.load()
                 parts = []
                 sr = 0
-                for chunk in chunk_text(clean_text(text, strip_markdown=s.strip_markdown, urls=s.read_urls_as)):
-                    lang = s.language if s.language != "auto" else detect_language(chunk).code
-                    if spec.supports_lang_tag and lang not in spec.languages:
-                        lang = "en"
-                    a = eng.synthesize(chunk, speaker_id=s.speaker_id, speed=s.speed, lang=lang, num_steps=s.num_steps)
+                chunks = chunk_text(clean_text(text, strip_markdown=s.strip_markdown, urls=s.read_urls_as))
+                for chunk, lang in zip(chunks, plan_languages(chunks, spec, s)):
+                    spoken = prepare_chunk(chunk, lang, s)
+                    a = eng.synthesize(
+                        spoken,
+                        speaker_id=s.speaker_id,
+                        speed=s.speed,
+                        lang=lang,
+                        num_steps=s.num_steps,
+                        reference_audio=s.reference_audio,
+                    )
                     sr = a.sample_rate
                     parts.append(a.samples)
                     parts.append(np.zeros(int(sr * 0.12), dtype=np.float32))
@@ -348,6 +395,20 @@ class UtterApp(QObject):
         self.speaker.stop()
         self.hotkeys.stop()
         self.tray.hide()
+
+
+def _autostart_registered() -> bool:
+    """True when an HKCU Run entry for the app already exists (e.g. created by the installer)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as key:
+            winreg.QueryValueEx(key, APP_NAME)
+            return True
+    except OSError:
+        return False
 
 
 # --------------------------------------------------------------------------- bootstrap

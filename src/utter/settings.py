@@ -22,6 +22,10 @@ class Hotkeys:
     show_window: str = "Ctrl+Alt+U"
 
 
+SPEED_MIN = 0.5
+SPEED_MAX = 3.0
+
+
 @dataclass
 class Settings:
     # Voice
@@ -30,6 +34,8 @@ class Settings:
     speed: float = 1.0
     language: str = "auto"  # "auto" or an ISO code like "en", "de", "uk", "ru"
     num_steps: int = 8  # Supertonic diffusion steps (quality vs latency)
+    verbalize_numbers: bool = True  # "2026" -> "twenty twenty-six" (en/de/ru/uk) before synthesis
+    reference_audio: str = ""  # optional WAV for voice-cloning models (Pocket TTS); "" = built-in voice
     # Audio
     output_device: str = ""  # "" = system default; otherwise a device name substring
     volume: float = 1.0
@@ -37,6 +43,7 @@ class Settings:
     start_minimized: bool = False
     close_to_tray: bool = True
     launch_at_login: bool = False
+    asked_autostart: bool = False  # first-run "start with Windows?" prompt already shown
     show_overlay: bool = True
     strip_markdown: bool = True
     read_urls_as: str = "link"  # "link" | "skip" | "verbatim"
@@ -72,7 +79,7 @@ class Settings:
         hotkeys = Hotkeys(**{k: v for k, v in hk_raw.items() if k in hk_known})
         s = cls(**data)
         s.hotkeys = hotkeys
-        s.speed = float(min(max(s.speed, 0.5), 2.0))
+        s.speed = float(min(max(s.speed, SPEED_MIN), SPEED_MAX))
         s.volume = float(min(max(s.volume, 0.0), 1.5))
         s.num_threads = int(min(max(s.num_threads, 1), 16))
         s.num_steps = int(min(max(s.num_steps, 1), 32))

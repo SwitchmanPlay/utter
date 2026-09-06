@@ -11,11 +11,13 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QHBoxLayout,
     QKeySequenceEdit,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -225,11 +227,20 @@ class SettingsDialog(QDialog):
         self.cb_overlay.setChecked(s.show_overlay)
         self.cb_markdown = QCheckBox("Strip Markdown (##, **, `code`, links) before reading")
         self.cb_markdown.setChecked(s.strip_markdown)
+        self.cb_numbers = QCheckBox("Read numbers, dates, prices and % as words in the sentence's language")
+        self.cb_numbers.setChecked(s.verbalize_numbers)
+        self.cb_numbers.setToolTip(
+            "Turns “1 000 €”, “12.05.2026”, “3.5 %” or “10:30” into words before synthesis so the model\n"
+            "cannot guess the wrong language for bare digits. Supports English, German, Ukrainian, Russian."
+        )
         self.cmb_urls = QComboBox()
         for code, label in (("link", "say “link”"), ("skip", "skip them"), ("verbatim", "read them out")):
             self.cmb_urls.addItem(label, code)
         self.cmb_urls.setCurrentIndex(max(0, self.cmb_urls.findData(s.read_urls_as)))
-        for cb in (self.cb_autostart, self.cb_start_min, self.cb_close_tray, self.cb_overlay, self.cb_markdown):
+        for cb in (
+            self.cb_autostart, self.cb_start_min, self.cb_close_tray, self.cb_overlay,
+            self.cb_markdown, self.cb_numbers,
+        ):
             form.addRow(cb)
         form.addRow("URLs in text:", self.cmb_urls)
 
@@ -242,8 +253,10 @@ class SettingsDialog(QDialog):
         self.sp_steps = QSpinBox()
         self.sp_steps.setRange(2, 32)
         self.sp_steps.setValue(s.num_steps)
-        self.sp_steps.setToolTip("Supertonic only. Fewer steps = faster, more = slightly higher quality. Default 8.")
-        form.addRow("Supertonic quality steps:", self.sp_steps)
+        self.sp_steps.setToolTip(
+            "Supertonic and Pocket TTS only. Fewer steps = faster, more = slightly higher quality. Default 8."
+        )
+        form.addRow("Quality steps:", self.sp_steps)
         return w
 
     def _hotkeys_tab(self) -> QWidget:
@@ -295,7 +308,28 @@ class SettingsDialog(QDialog):
         row.addWidget(self.sl_volume, 1)
         row.addWidget(self.lbl_volume)
         form.addRow("Volume:", row)
+
+        # Voice cloning (Pocket TTS): optional reference WAV.
+        ref_row = QHBoxLayout()
+        self.ed_reference = QLineEdit(self.settings.reference_audio)
+        self.ed_reference.setPlaceholderText("Optional: WAV of a voice to clone (Pocket TTS only)")
+        self.ed_reference.setToolTip(
+            "5–15 seconds of clean speech, 16-bit mono WAV. Leave empty to use the voice picked in the main window."
+        )
+        btn_browse = QPushButton("Browse…")
+        btn_browse.clicked.connect(self._pick_reference)
+        btn_clear = QPushButton("Clear", objectName="flat")
+        btn_clear.clicked.connect(lambda: self.ed_reference.setText(""))
+        ref_row.addWidget(self.ed_reference, 1)
+        ref_row.addWidget(btn_browse)
+        ref_row.addWidget(btn_clear)
+        form.addRow("Clone voice from:", ref_row)
         return w
+
+    def _pick_reference(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a reference voice", "", "WAV audio (*.wav)")
+        if path:
+            self.ed_reference.setText(path)
 
     def _models_tab(self) -> QWidget:
         scroll = QScrollArea()
@@ -332,6 +366,8 @@ class SettingsDialog(QDialog):
         s.close_to_tray = self.cb_close_tray.isChecked()
         s.show_overlay = self.cb_overlay.isChecked()
         s.strip_markdown = self.cb_markdown.isChecked()
+        s.verbalize_numbers = self.cb_numbers.isChecked()
+        s.reference_audio = self.ed_reference.text().strip()
         s.read_urls_as = self.cmb_urls.currentData()
         s.num_threads = self.sp_threads.value()
         s.num_steps = self.sp_steps.value()

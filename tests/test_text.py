@@ -6,7 +6,7 @@ def test_clean_strips_markdown():
     out = clean_text(md)
     assert "##" not in out and "**" not in out and "`" not in out
     assert "link" in out and "https://" not in out
-    assert "(code block omitted)" in out
+    assert "code block omitted" in out and "print" not in out
     assert "item one" in out and "- item" not in out
 
 
@@ -59,3 +59,40 @@ def test_detect_language_scripts():
     assert detect_language("\u042d\u0442\u043e \u043e\u0447\u0435\u043d\u044c \u0445\u043e\u0440\u043e\u0448\u0438\u0439 \u0434\u0435\u043d\u044c, \u0438 \u043c\u044b \u0438\u0434\u0451\u043c \u0433\u0443\u043b\u044f\u0442\u044c.").code == "ru"
     assert detect_language("").code == "en"
     assert detect_language("12345 !!!", default="de").code == "de"
+
+
+# ---- v0.2.0: brackets, punctuation, language memory -------------------------
+
+from utter.tts.text import assign_languages, speakable_punctuation  # noqa: E402
+
+
+def test_brackets_become_pauses():
+    out = clean_text("Hello (world) [see] {x} done.")
+    assert "(" not in out and ")" not in out and "[" not in out and "{" not in out
+    assert out.startswith("Hello, world, see, x")
+    assert "done." in out
+
+
+def test_speakable_punctuation_is_stable():
+    once = speakable_punctuation("a (b) c")
+    assert speakable_punctuation(once) == once
+
+
+def test_assign_languages_fixed_wins():
+    assert assign_languages(["Hallo", "2024"], fixed="de") == ["de", "de"]
+
+
+def test_assign_languages_keeps_language_for_numeric_chunks():
+    chunks = ["\u041f\u0440\u0438\u0432\u0456\u0442, \u044f\u043a \u0441\u043f\u0440\u0430\u0432\u0438 \u0441\u044c\u043e\u0433\u043e\u0434\u043d\u0456?", "2024.", "Nr. 5"]
+    assert assign_languages(chunks, default="en") == ["uk", "uk", "uk"]
+
+
+def test_assign_languages_switches_on_script_change():
+    chunks = ["\u041f\u0440\u0438\u0432\u0456\u0442, \u044f\u043a \u0441\u043f\u0440\u0430\u0432\u0438 \u0441\u044c\u043e\u0433\u043e\u0434\u043d\u0456?", "Hello there my friend", "\u0414\u043e\u0431\u0440\u0435, \u0434\u044f\u043a\u0443\u044e \u0442\u043e\u0431\u0456."]
+    langs = assign_languages(chunks, default="en")
+    assert langs[0] == "uk" and langs[1] == "en" and langs[2] == "uk"
+
+
+def test_assign_languages_clamps_to_model_languages():
+    langs = assign_languages(["Bonjour tout le monde, comment allez-vous?"], default="en", allowed=("en", "de"))
+    assert langs == ["en"]

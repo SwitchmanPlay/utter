@@ -23,8 +23,32 @@ from PySide6.QtWidgets import (
 
 from utter import APP_NAME, REPO_URL, __version__
 from utter.models.registry import MODELS, ModelSpec, get_model, installed_models
-from utter.settings import Settings
+from utter.settings import SPEED_MAX, SPEED_MIN, Settings
 from utter.tts import speaker as spk
+
+
+def _force_foreground(widget: QWidget) -> None:
+    """Win32-only: make `widget` the foreground window regardless of who has focus."""
+    import sys
+
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32
+        hwnd = int(widget.winId())
+        SW_RESTORE, VK_MENU, KEYEVENTF_KEYUP = 9, 0x12, 0x0002
+        if user32.IsIconic(hwnd):
+            user32.ShowWindow(hwnd, SW_RESTORE)
+        # Simulated Alt tap grants us permission to steal the foreground.
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+        user32.SetForegroundWindow(hwnd)
+        user32.BringWindowToTop(hwnd)
+    except Exception:  # pragma: no cover - best effort only
+        pass
+
 
 LANGUAGE_LABELS = {
     "auto": "Auto-detect",
@@ -143,11 +167,18 @@ class MainWindow(QMainWindow):
         speed_row = QHBoxLayout()
         speed_row.addWidget(QLabel("Speed", objectName="muted"))
         self.speed_slider = QSlider(Qt.Orientation.Horizontal)
-        self.speed_slider.setRange(50, 200)
+        self.speed_slider.setRange(int(SPEED_MIN * 100), int(SPEED_MAX * 100))
         self.speed_slider.setSingleStep(5)
+        self.speed_slider.setPageStep(25)
+        self.speed_slider.setTickInterval(50)
+        self.speed_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self.speed_slider.setToolTip("Playback speed (0.5× – 3×). Click the value to reset to 1×.")
         self.speed_slider.setValue(int(round(self.settings.speed * 100)))
-        self.speed_label = QLabel(f"{self.settings.speed:.2f}×", objectName="muted")
-        self.speed_label.setMinimumWidth(48)
+        self.speed_label = QPushButton(f"{self.settings.speed:.2f}×", objectName="flat")
+        self.speed_label.setToolTip("Reset speed to 1×")
+        self.speed_label.setFlat(True)
+        self.speed_label.setMinimumWidth(52)
+        self.speed_label.clicked.connect(self.reset_speed)
         speed_row.addWidget(self.speed_slider, 1)
         speed_row.addWidget(self.speed_label)
         self.words_label = QLabel("", objectName="muted")
@@ -285,6 +316,9 @@ class MainWindow(QMainWindow):
         self.speed_label.setText(f"{self.settings.speed:.2f}×")
         self.settings_changed.emit()
 
+    def reset_speed(self) -> None:
+        self.speed_slider.setValue(100)
+
     # ---- actions --------------------------------------------------------
     def _speak_pad(self) -> None:
         text = self.text.toPlainText()
@@ -319,8 +353,10 @@ class MainWindow(QMainWindow):
             self,
             f"About {APP_NAME}",
             f"<b>{APP_NAME}</b> {__version__}<br>"
-            "Handy, but for text-to-speech. Fully offline, runs on your CPU.<br><br>"
-            "Engines: Supertonic 3, Kokoro, Piper via sherpa-onnx.<br>"
+            "<i>Select it. Hear it.</i><br><br>"
+            "Utter reads any text on your screen aloud — offline, on your CPU, in your language.<br>"
+            "To <i>utter</i> something is to say it out loud; that is all this app does, and it does it well.<br><br>"
+            "Engines: Supertonic 3, Kokoro, Piper, Pocket TTS, KittenTTS via sherpa-onnx.<br>"
             f"<a href='{REPO_URL}'>{REPO_URL}</a>",
         )
 
@@ -379,9 +415,18 @@ class MainWindow(QMainWindow):
         self.settings.last_text = self.text.toPlainText()[:20000]
 
     def show_and_raise(self) -> None:
-        self.showNormal()
+        """Bring the window to the front even when another app currently has focus.
+
+        Windows refuses `activateWindow()` from a background process (foreground-lock).
+        The classic workaround: tap Alt and call SetForegroundWindow ourselves.
+        """
+        if self.isMinimized() or not self.isVisible():
+            self.showNormal()
+        else:
+            self.show()
         self.raise_()
         self.activateWindow()
+        _force_foreground(self)
         self.text.setFocus()
 
     def force_quit(self) -> None:

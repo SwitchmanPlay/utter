@@ -19,7 +19,8 @@ from PySide6.QtCore import QObject, Signal
 from utter.models.registry import ModelSpec
 from utter.settings import Settings
 from utter.tts.engine import Audio, EngineCache, EngineError
-from utter.tts.text import chunk_text, clean_text, detect_language
+from utter.tts.text import assign_languages, chunk_text, clean_text
+from utter.tts.numbers import normalize_numbers
 
 log = logging.getLogger(__name__)
 
@@ -35,9 +36,29 @@ class _Job:
     spec: ModelSpec
     settings: Settings
     chunks: list[str] = field(default_factory=list)
+    langs: list[str] = field(default_factory=list)
     stop: threading.Event = field(default_factory=threading.Event)
     paused: threading.Event = field(default_factory=threading.Event)
     started_at: float = field(default_factory=time.perf_counter)
+
+
+def plan_languages(chunks: list[str], spec: ModelSpec, settings: Settings) -> list[str]:
+    """One language tag per chunk: fixed from settings, or auto-detected with memory so
+    numbers / short lines never flip the model into another language."""
+    fixed = settings.language if settings.language != "auto" else None
+    allowed = tuple(spec.languages) if spec.languages else None
+    langs = assign_languages(chunks, fixed=fixed, default="en", allowed=allowed if not fixed else None)
+    if allowed:
+        fallback = "en" if "en" in allowed else allowed[0]
+        langs = [lang if lang in allowed else fallback for lang in langs]
+    return langs
+
+
+def prepare_chunk(chunk: str, lang: str, settings: Settings) -> str:
+    """Last-mile text prep right before synthesis (numbers -> words)."""
+    if getattr(settings, "verbalize_numbers", True):
+        chunk = normalize_numbers(chunk, lang)
+    return chunk
 
 
 class _AudioBuffer:
@@ -120,7 +141,8 @@ class Speaker(QObject):
         if not chunks:
             return False
         self.stop()
-        job = _Job(text=cleaned, spec=spec, settings=settings, chunks=chunks)
+        langs = plan_languages(chunks, spec, settings)
+        job = _Job(text=cleaned, spec=spec, settings=settings, chunks=chunks, langs=langs)
         with self._lock:
             self._job = job
             self._thread = threading.Thread(target=self._run, args=(job,), name="utter-speaker", daemon=True)
@@ -226,12 +248,16 @@ class Speaker(QObject):
         for idx, chunk in enumerate(job.chunks, start=1):
             if job.stop.is_set():
                 break
-            lang = s.language if s.language != "auto" else detect_language(chunk, default="en").code
-            if job.spec.supports_lang_tag and lang not in job.spec.languages:
-                lang = "en" if "en" in job.spec.languages else job.spec.languages[0]
+            lang = job.langs[idx - 1] if idx - 1 < len(job.langs) else "en"
+            spoken = prepare_chunk(chunk, lang, s)
             t0 = time.perf_counter()
             audio: Audio = engine.synthesize(
-                chunk, speaker_id=s.speaker_id, speed=s.speed, lang=lang, num_steps=s.num_steps
+                spoken,
+                speaker_id=s.speaker_id,
+                speed=s.speed,
+                lang=lang,
+                num_steps=s.num_steps,
+                reference_audio=s.reference_audio,
             )
             synth_s = time.perf_counter() - t0
             if job.stop.is_set():

@@ -37,10 +37,12 @@ class Overlay(QWidget):
         self.btn_pause.setToolTip("Pause / resume")
         self.btn_stop = QPushButton("■", objectName="flat")
         self.btn_stop.setToolTip("Stop")
-        self.btn_open = QPushButton("↗", objectName="flat")
-        self.btn_open.setToolTip("Open Utter")
-        for b in (self.btn_pause, self.btn_stop, self.btn_open):
+        self.btn_open = QPushButton("Open", objectName="flat")
+        self.btn_open.setToolTip("Hide this mini player and open the text in the Utter window")
+        for b in (self.btn_pause, self.btn_stop):
             b.setFixedSize(28, 28)
+        self.btn_open.setFixedHeight(28)
+        for b in (self.btn_pause, self.btn_stop, self.btn_open):
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         lay.addWidget(self.dot)
         lay.addWidget(self.label, 1)

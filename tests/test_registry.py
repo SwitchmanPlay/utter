@@ -10,7 +10,7 @@ def test_catalogue_is_consistent():
     assert default_model().id == "supertonic-3-int8"
     for m in MODELS:
         assert m.url.startswith("https://") and m.url.endswith(".tar.bz2")
-        assert m.family in ("kokoro", "supertonic", "vits")
+        assert m.family in ("kokoro", "supertonic", "vits", "pocket", "kitten")
         assert m.num_speakers >= 1
         assert len(m.voice_names()) == m.num_speakers
         assert m.languages
