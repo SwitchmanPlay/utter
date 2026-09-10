@@ -1,5 +1,50 @@
 # Changelog
 
+## 3.0.0 — 2026-09-09
+
+Bug-fix release. No new models; the mini player, the speaker pipeline and the hotkeys got the attention.
+
+### Mini player (overlay)
+- **It moves now.** The mini player can be dragged by its label/frame (the buttons still click). It was created with a
+  frameless, click-through-ish widget that had no mouse handling at all, so trying to move it did nothing.
+- **Remembers where you put it.** After a drag it stays at that spot for the next read and across restarts
+  (`overlay_pos` in settings.json). New Settings → General checkbox *"Mini player appears next to the cursor"*
+  switches back to follow-the-cursor mode.
+- **Shows up for every hotkey read.** Previously it was suppressed whenever the Utter window happened to be the active
+  window, so `Ctrl+Alt+R` on text inside Utter itself or right after using the window showed no player.
+  Now only reads started from the window's own Speak button skip it.
+- **Hides on every stop.** Stop from the tray, the window or the player itself now dismisses it (before only the
+  hotkey did); the *Done* fade only runs when the player is actually visible.
+- Position is clamped to the screen the cursor is on (multi-monitor safe), and the player never grabs keyboard focus.
+
+### Speaker / playback
+- **No more "stuck" or wrong UI state after re-triggering.** Starting a new read while one was playing let the *old*
+  worker thread finish later and reset the state to Idle / emit `finished`, which greyed out Pause/Stop and made the
+  player fade while audio was still playing. State changes are now tagged with the job they belong to and dropped
+  if that job has been replaced.
+- **Hotkeys do not freeze the UI.** `speak()` and `stop()` no longer join the old worker thread on the Qt thread
+  (up to 2 s freeze when a long chunk was being synthesised). The new worker waits for the old one itself.
+- **Model preload no longer clobbers a running read**, and the engine can no longer be loaded twice in parallel
+  (preload + first hotkey at the same time). `Engine.load()` is locked.
+- Pause/resume reports the right state (Loading vs Speaking) when you unpause before the first audio arrived.
+
+### Hotkeys / clipboard
+- **Read selection works in slow apps.** Instead of one fixed 180 ms wait after the simulated `Ctrl+C`, Utter
+  polls the clipboard for up to 0.8 s. Browsers and Electron apps often needed longer, which resulted in reading
+  the *previous* clipboard content or "Nothing to read."
+- `utter --speak-clipboard` while Utter is already running now forwards the request to the running instance
+  instead of just showing its window.
+
+### Window
+- Bringing the window to the front (hotkey, tray, mini player *Open*) now falls back to `AttachThreadInput` when
+  the Alt-tap trick is ignored, clears the minimized state properly and re-activates after the Win32 call.
+
+### Internals
+- Cross-thread signals (`_wav_done`, single-instance wake-up) are connected to bound methods instead of lambdas,
+  so slots run on the Qt thread and never touch widgets from a worker.
+- Settings: `overlay_pos` and `read_urls_as` are validated on load; `save()` creates the settings folder if needed.
+- Quality-steps spinner accepts 1 (matches what `Settings.from_dict` allows).
+
 ## 0.2.0 — 2026-09-06
 
 Speech quality, models, packaging.

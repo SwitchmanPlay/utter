@@ -6,6 +6,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from logging.handlers import RotatingFileHandler
 
 from PySide6.QtCore import QObject, Qt, QTimer, Signal
@@ -62,6 +63,7 @@ class UtterApp(QObject):
         self._settings_dialog: SettingsDialog | None = None
         self._current_text: str = ""
         self._saved_clip: str | None = None
+        self._copy_deadline: float = 0.0
         self._wire()
         self.apply_hotkeys()
         self._apply_autostart()
@@ -82,10 +84,10 @@ class UtterApp(QObject):
     # ---- wiring ----------------------------------------------------------
     def _wire(self) -> None:
         w, t, o, s = self.window, self.tray, self.overlay, self.speaker
-        w.speak_requested.connect(self.speak)
+        w.speak_requested.connect(self._speak_from_window)
         w.read_clipboard_requested.connect(self.read_clipboard)
         w.pause_requested.connect(s.toggle_pause)
-        w.stop_requested.connect(s.stop)
+        w.stop_requested.connect(self.stop)
         w.save_wav_requested.connect(self.save_wav)
         w.settings_changed.connect(self._on_ui_settings_changed)
         w.open_settings_requested.connect(self.open_settings)
@@ -94,13 +96,15 @@ class UtterApp(QObject):
         t.show_window.connect(self.toggle_window)
         t.read_clipboard.connect(self.read_clipboard)
         t.pause_resume.connect(s.toggle_pause)
-        t.stop.connect(s.stop)
-        t.open_settings.connect(lambda: self.open_settings("general"))
+        t.stop.connect(self.stop)
+        t.open_settings.connect(self._open_general_settings)
         t.quit.connect(self.quit)
 
         o.pause_clicked.connect(s.toggle_pause)
-        o.stop_clicked.connect(s.stop)
+        o.stop_clicked.connect(self.stop)
         o.open_clicked.connect(self._open_from_overlay)
+        o.moved.connect(self._on_overlay_moved)
+        self._apply_overlay_settings()
 
         s.state_changed.connect(t.on_state)
         s.state_changed.connect(o.on_state)
@@ -108,9 +112,32 @@ class UtterApp(QObject):
         s.error.connect(self._on_error)
 
         self._bridge.fired.connect(self._on_hotkey)
-        self._wav_done.connect(lambda p: self.window.set_status(f"Saved {os.path.basename(p)}"))
+        # Bound methods, not lambdas: a lambda has no thread affinity, so a signal emitted
+        # from the worker thread would run it *on the worker thread* and touch Qt widgets
+        # from there. Methods of this QObject are queued to the Qt thread instead.
+        self._wav_done.connect(self._on_wav_done)
         self._wav_failed.connect(self.window.show_error)
         self.qapp.aboutToQuit.connect(self._shutdown)
+
+    def _open_general_settings(self) -> None:
+        self.open_settings("general")
+
+    def _on_wav_done(self, path: str) -> None:
+        self.window.set_status(f"Saved {os.path.basename(path)}")
+
+    def _apply_overlay_settings(self) -> None:
+        s = self.settings
+        self.overlay.set_follow_cursor(s.overlay_follow_cursor)
+        self.overlay.set_pinned_position(tuple(s.overlay_pos) if len(s.overlay_pos) == 2 else None)
+        if not s.show_overlay:
+            self.overlay.hide()
+
+    def _on_overlay_moved(self, x: int, y: int) -> None:
+        """User dragged the mini player: remember the spot and stop following the cursor."""
+        self.settings.overlay_pos = [int(x), int(y)]
+        self.settings.overlay_follow_cursor = False
+        self.overlay.set_follow_cursor(False)
+        self.settings.save()
 
     def _open_from_overlay(self) -> None:
         """Overlay's 'Open' button: dismiss the mini player and bring the editor to the front."""
@@ -177,7 +204,9 @@ class UtterApp(QObject):
         self._apply_autostart()
 
     # ---- speaking ---------------------------------------------------------
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, *, from_window: bool = False) -> None:
+        """Read `text` aloud. The mini player is shown for every hotkey/tray/CLI read and for
+        window reads only when the window itself is not in front (it has its own controls)."""
         spec = self.current_model()
         if spec is None:
             self._first_run()
@@ -186,8 +215,16 @@ class UtterApp(QObject):
             self.window.set_status("Nothing to read.")
             return
         self._current_text = text
-        if self.settings.show_overlay and not self.window.isActiveWindow():
+        if self.settings.show_overlay and not (from_window and self.window.isActiveWindow()):
             self.overlay.show_near_cursor()
+
+    def _speak_from_window(self, text: str) -> None:
+        self.speak(text, from_window=True)
+
+    def stop(self) -> None:
+        """Stop playback from any control (window, tray, overlay, hotkey) and dismiss the player."""
+        self.speaker.stop()
+        self.overlay.hide()
 
     def read_clipboard(self) -> None:
         text = self.qapp.clipboard().text()
@@ -207,11 +244,18 @@ class UtterApp(QObject):
             log.warning("send_copy failed: %s", exc)
             self.read_clipboard()
             return
-        QTimer.singleShot(180, self._after_copy)
+        # Poll instead of a single fixed wait: browsers and Electron apps can take well over
+        # 200 ms to service Ctrl+C, which made the hotkey silently fall back to the old
+        # clipboard content ("it reads the previous text").
+        self._copy_deadline = time.monotonic() + 0.8
+        QTimer.singleShot(60, self._after_copy)
 
     def _after_copy(self) -> None:
         clip = self.qapp.clipboard()
         text = clip.text()
+        if not text.strip() and time.monotonic() < self._copy_deadline:
+            QTimer.singleShot(50, self._after_copy)
+            return
         saved = self._saved_clip
         self._saved_clip = None
         if not text.strip():
@@ -310,8 +354,7 @@ class UtterApp(QObject):
             if self.speaker.busy:
                 self.speaker.toggle_pause()
         elif name == "stop":
-            self.speaker.stop()
-            self.overlay.hide()
+            self.stop()
         elif name == "show_window":
             self.toggle_window()
 
@@ -347,6 +390,7 @@ class UtterApp(QObject):
     def _on_settings_applied(self) -> None:
         self.apply_hotkeys()
         self._apply_autostart()
+        self._apply_overlay_settings()
         self.window.refresh_models()
 
     def _on_ui_settings_changed(self) -> None:
@@ -392,7 +436,8 @@ class UtterApp(QObject):
     def _shutdown(self) -> None:
         self.window.persist()
         self.settings.save()
-        self.speaker.stop()
+        self.overlay.hide()
+        self.speaker.stop(wait=2.0)
         self.hotkeys.stop()
         self.tray.hide()
 
@@ -436,12 +481,12 @@ def _setup_logging() -> None:
         root.addHandler(sh)
 
 
-def _single_instance_or_wake() -> QLocalServer | None:
+def _single_instance_or_wake(message: bytes = b"show") -> QLocalServer | None:
     """Return a QLocalServer if we are the first instance; else wake the other one and return None."""
     sock = QLocalSocket()
     sock.connectToServer(SINGLE_INSTANCE_KEY)
     if sock.waitForConnected(300):
-        sock.write(b"show")
+        sock.write(message)
         sock.flush()
         sock.waitForBytesWritten(300)
         sock.disconnectFromServer()
@@ -467,9 +512,9 @@ def main(argv: list[str] | None = None) -> int:
     qapp.setStyle("Fusion")
     qapp.setStyleSheet(QSS)
 
-    server = _single_instance_or_wake()
+    server = _single_instance_or_wake(b"speak-clipboard" if "--speak-clipboard" in argv else b"show")
     if server is None:
-        log.info("another instance is running; asked it to show itself")
+        log.info("another instance is running; forwarded the request to it")
         return 0
 
     app = UtterApp(qapp)
@@ -477,8 +522,18 @@ def main(argv: list[str] | None = None) -> int:
 
     def _incoming():
         conn = server.nextPendingConnection()
-        if conn is not None:
-            conn.readyRead.connect(lambda: (conn.readAll(), app.window.show_and_raise()))
+        if conn is None:
+            return
+
+        def _on_ready():
+            data = bytes(conn.readAll()).strip()
+            conn.disconnectFromServer()
+            if data == b"speak-clipboard":
+                app.read_clipboard()
+            else:
+                app.window.show_and_raise()
+
+        conn.readyRead.connect(_on_ready)
 
     server.newConnection.connect(_incoming)
 

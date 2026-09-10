@@ -41,8 +41,16 @@ class Engine:
 
     # ---- loading -------------------------------------------------------
     def load(self) -> None:
+        """Load the model once. Safe to call from several threads at the same time: the
+        preload thread and a speak job used to race here and load the model twice."""
         if self._tts is not None:
             return
+        with self._lock:
+            if self._tts is not None:
+                return
+            self._load_locked()
+
+    def _load_locked(self) -> None:
         try:
             import sherpa_onnx  # heavy import, keep it lazy
         except ImportError as exc:  # pragma: no cover

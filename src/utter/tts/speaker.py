@@ -39,6 +39,7 @@ class _Job:
     langs: list[str] = field(default_factory=list)
     stop: threading.Event = field(default_factory=threading.Event)
     paused: threading.Event = field(default_factory=threading.Event)
+    playing: threading.Event = field(default_factory=threading.Event)  # set once audio flows
     started_at: float = field(default_factory=time.perf_counter)
 
 
@@ -135,18 +136,32 @@ class Speaker(QObject):
         return self._state in (STATE_LOADING, STATE_SPEAKING, STATE_PAUSED)
 
     def speak(self, text: str, spec: ModelSpec, settings: Settings) -> bool:
-        """Start speaking `text`. Any current playback is stopped first."""
+        """Start speaking `text`. Any current playback is stopped first.
+
+        Never blocks the caller: the previous job is only *signalled* to stop here; the new
+        worker waits for it to wind down before touching the engine. (v0.2 joined the old
+        thread on the Qt thread, which froze the UI for up to 2 s when a hotkey was pressed
+        while a long chunk was being synthesised.)
+        """
         cleaned = clean_text(text, strip_markdown=settings.strip_markdown, urls=settings.read_urls_as)
         chunks = chunk_text(cleaned)
         if not chunks:
             return False
-        self.stop()
         langs = plan_languages(chunks, spec, settings)
         job = _Job(text=cleaned, spec=spec, settings=settings, chunks=chunks, langs=langs)
         with self._lock:
+            prev_job, prev_thread = self._job, self._thread
+            if prev_job is not None:
+                prev_job.stop.set()
+                prev_job.paused.clear()
             self._job = job
-            self._thread = threading.Thread(target=self._run, args=(job,), name="utter-speaker", daemon=True)
+            self._thread = threading.Thread(
+                target=self._run, args=(job, prev_thread), name="utter-speaker", daemon=True
+            )
             self._thread.start()
+        # The old job may still be draining its stream; tell the UI right away that a new
+        # read has started so buttons enable and the mini player does not flash "Done".
+        self._set_state(STATE_LOADING, job)
         return True
 
     def toggle_pause(self) -> None:
@@ -155,58 +170,81 @@ class Speaker(QObject):
             return
         if job.paused.is_set():
             job.paused.clear()
-            self._set_state(STATE_SPEAKING)
+            self._set_state(STATE_SPEAKING if job.playing.is_set() else STATE_LOADING, job)
         else:
             job.paused.set()
-            self._set_state(STATE_PAUSED)
+            self._set_state(STATE_PAUSED, job)
 
-    def stop(self) -> None:
+    def stop(self, wait: float = 0.0) -> None:
+        """Stop playback. Non-blocking by default; pass `wait` seconds to join the worker
+        (only used at shutdown)."""
         with self._lock:
             job, thread = self._job, self._thread
         if job is None:
             return
         job.stop.set()
         job.paused.clear()
-        if thread is not None and thread.is_alive() and threading.current_thread() is not thread:
-            thread.join(timeout=2.0)
+        if wait > 0 and thread is not None and thread.is_alive() and threading.current_thread() is not thread:
+            thread.join(timeout=wait)
 
     def preload(self, spec: ModelSpec, settings: Settings) -> None:
-        """Warm a model in the background so the first hotkey press is fast."""
+        """Warm a model in the background so the first hotkey press is fast.
+
+        Must never disturb a running job: only reports LOADING / IDLE while nothing is
+        being spoken (in v0.2 a preload finishing mid-read flipped the UI back to idle).
+        """
 
         def _load():
             try:
-                self._set_state(STATE_LOADING)
+                if self._job is None:
+                    self._set_state(STATE_LOADING)
                 self.engines.get(spec, settings.num_threads).load()
             except Exception as exc:
-                self.error.emit(str(exc))
+                log.warning("preload failed: %s", exc)
+                if self._job is None:
+                    self.error.emit(str(exc))
             finally:
-                if self._state == STATE_LOADING:
+                if self._job is None and self._state == STATE_LOADING:
                     self._set_state(STATE_IDLE)
 
         threading.Thread(target=_load, name="utter-preload", daemon=True).start()
 
     # ---- worker ----------------------------------------------------------
-    def _set_state(self, state: str) -> None:
+    def _is_current(self, job: _Job | None) -> bool:
+        return job is None or self._job is job
+
+    def _set_state(self, state: str, job: _Job | None = None) -> None:
+        """Publish a state change. When `job` is given the change is dropped if that job
+        has already been replaced by a newer one (its thread may still be finishing)."""
+        if not self._is_current(job):
+            return
         if state != self._state:
             self._state = state
             self.state_changed.emit(state)
 
-    def _run(self, job: _Job) -> None:
+    def _run(self, job: _Job, prev_thread: threading.Thread | None) -> None:
         try:
-            self._run_inner(job)
+            if prev_thread is not None and prev_thread is not threading.current_thread() and prev_thread.is_alive():
+                prev_thread.join(timeout=5.0)
+            if not job.stop.is_set():
+                self._run_inner(job)
         except EngineError as exc:
             log.error("engine error: %s", exc)
-            self.error.emit(str(exc))
+            if self._is_current(job):
+                self.error.emit(str(exc))
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("speaker crashed")
-            self.error.emit(f"{type(exc).__name__}: {exc}")
+            if self._is_current(job):
+                self.error.emit(f"{type(exc).__name__}: {exc}")
         finally:
             with self._lock:
-                if self._job is job:
+                current = self._job is job
+                if current:
                     self._job = None
                     self._thread = None
-            self._set_state(STATE_IDLE)
-            self.finished.emit()
+            if current:
+                self._set_state(STATE_IDLE)
+                self.finished.emit()
 
     def _run_inner(self, job: _Job) -> None:
         import sounddevice as sd
@@ -214,14 +252,13 @@ class Speaker(QObject):
         s = job.settings
         engine = self.engines.get(job.spec, s.num_threads)
         if not engine.loaded:
-            self._set_state(STATE_LOADING)
+            self._set_state(STATE_LOADING, job)
             engine.load()
         if job.stop.is_set():
             return
 
         buffer = _AudioBuffer()
         stream_done = threading.Event()
-        stream_holder: dict[str, object] = {}
         total = len(job.chunks)
         first_audio_at: float | None = None
         gain = float(np.clip(s.volume, 0.0, 1.5))
@@ -245,72 +282,78 @@ class Speaker(QObject):
 
         device = _resolve_output_device(sd, s.output_device)
         stream = None
-        for idx, chunk in enumerate(job.chunks, start=1):
-            if job.stop.is_set():
-                break
-            lang = job.langs[idx - 1] if idx - 1 < len(job.langs) else "en"
-            spoken = prepare_chunk(chunk, lang, s)
-            t0 = time.perf_counter()
-            audio: Audio = engine.synthesize(
-                spoken,
-                speaker_id=s.speaker_id,
-                speed=s.speed,
-                lang=lang,
-                num_steps=s.num_steps,
-                reference_audio=s.reference_audio,
-            )
-            synth_s = time.perf_counter() - t0
-            if job.stop.is_set():
-                break
-            if audio.samples.size == 0:
-                log.warning("empty audio for chunk %d", idx)
-                continue
-            samples = audio.samples * gain if gain != 1.0 else audio.samples
-            if gain > 1.0:
-                samples = np.clip(samples, -1.0, 1.0)
-
-            if stream is None:
-                stream = sd.OutputStream(
-                    samplerate=audio.sample_rate,
-                    channels=1,
-                    dtype="float32",
-                    device=device,
-                    callback=callback,
-                    finished_callback=on_finished,
-                    blocksize=0,
-                    latency="low",
+        try:
+            for idx, chunk in enumerate(job.chunks, start=1):
+                if job.stop.is_set():
+                    break
+                lang = job.langs[idx - 1] if idx - 1 < len(job.langs) else "en"
+                spoken = prepare_chunk(chunk, lang, s)
+                t0 = time.perf_counter()
+                audio: Audio = engine.synthesize(
+                    spoken,
+                    speaker_id=s.speaker_id,
+                    speed=s.speed,
+                    lang=lang,
+                    num_steps=s.num_steps,
+                    reference_audio=s.reference_audio,
                 )
-                stream_holder["stream"] = stream
-                stream.start()
-                first_audio_at = time.perf_counter() - job.started_at
-                self.stats.emit(
-                    f"first audio in {first_audio_at:.2f} s  ·  chunk RTF {synth_s / max(audio.duration, 1e-6):.2f}"
-                )
-                self._set_state(STATE_SPEAKING if not job.paused.is_set() else STATE_PAUSED)
+                synth_s = time.perf_counter() - t0
+                if job.stop.is_set():
+                    break
+                if audio.samples.size == 0:
+                    log.warning("empty audio for chunk %d", idx)
+                    continue
+                samples = audio.samples * gain if gain != 1.0 else audio.samples
+                if gain > 1.0:
+                    samples = np.clip(samples, -1.0, 1.0)
 
-            # small gap between chunks so sentences do not run into each other
-            gap = np.zeros(int(audio.sample_rate * 0.12), dtype=np.float32)
-            buffer.push(np.concatenate([samples, gap]))
-            self.progress.emit(idx, total)
-            self.chunk_started.emit(chunk)
+                if stream is None:
+                    stream = sd.OutputStream(
+                        samplerate=audio.sample_rate,
+                        channels=1,
+                        dtype="float32",
+                        device=device,
+                        callback=callback,
+                        finished_callback=on_finished,
+                        blocksize=0,
+                        latency="low",
+                    )
+                    stream.start()
+                    job.playing.set()
+                    first_audio_at = time.perf_counter() - job.started_at
+                    if self._is_current(job):
+                        self.stats.emit(
+                            f"first audio in {first_audio_at:.2f} s  ·  "
+                            f"chunk RTF {synth_s / max(audio.duration, 1e-6):.2f}"
+                        )
+                    self._set_state(STATE_SPEAKING if not job.paused.is_set() else STATE_PAUSED, job)
 
-            # throttle: do not run miles ahead of playback (keeps stop() snappy, saves CPU)
-            while (
-                not job.stop.is_set()
-                and buffer.queued_seconds(audio.sample_rate) > self.LOOKAHEAD_SECONDS
-            ):
-                time.sleep(0.05)
+                # small gap between chunks so sentences do not run into each other
+                gap = np.zeros(int(audio.sample_rate * 0.12), dtype=np.float32)
+                buffer.push(np.concatenate([samples, gap]))
+                if self._is_current(job):
+                    self.progress.emit(idx, total)
+                    self.chunk_started.emit(chunk)
 
-        buffer.producer_done = True
-        if stream is not None:
-            # wait for playback to drain or for stop()
-            while not stream_done.is_set() and not job.stop.is_set():
-                stream_done.wait(0.05)
-            try:
-                stream.stop()
-                stream.close()
-            except Exception:  # pragma: no cover
-                pass
+                # throttle: do not run miles ahead of playback (keeps stop() snappy, saves CPU)
+                while (
+                    not job.stop.is_set()
+                    and buffer.queued_seconds(audio.sample_rate) > self.LOOKAHEAD_SECONDS
+                ):
+                    time.sleep(0.05)
+
+            buffer.producer_done = True
+            if stream is not None:
+                # wait for playback to drain or for stop()
+                while not stream_done.is_set() and not job.stop.is_set():
+                    stream_done.wait(0.05)
+        finally:
+            if stream is not None:
+                try:
+                    stream.stop()
+                    stream.close()
+                except Exception:  # pragma: no cover
+                    pass
 
 
 def _resolve_output_device(sd, wanted: str):

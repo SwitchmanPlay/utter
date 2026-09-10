@@ -29,7 +29,7 @@ The name: *to utter* = to say something aloud. That is the whole product.
 - **Read selection anywhere** — `Ctrl+Alt+R` copies the selected text from whatever app is in front, speaks it, and restores your clipboard.
 - **Read clipboard** (`Ctrl+Alt+C`), **pause/resume** (`Ctrl+Alt+Space`), **stop** (`Ctrl+Alt+X`), **show/hide** (`Ctrl+Alt+U`). All rebindable.
 - **Text pad** — paste or type, hit **Speak** (`F5`), select a passage to speak only that, export to WAV (`Ctrl+S`).
-- **Mini player** pops up next to the cursor while speaking: pause, stop, or **Open** — which hides the mini player and brings the text into the main window.
+- **Mini player** pops up next to the cursor while speaking: pause, stop, or **Open** — which hides the mini player and brings the text into the main window. Drag it by its text to move it; it then stays where you dropped it (also after a restart). Settings → General switches it back to following the cursor.
 - **Speed 0.5× – 3×**, live, with a one-click reset.
 - **Streaming playback** — sentence 1 plays while sentence 2 is synthesised; first audio typically < 1 s on a modern CPU.
 - **Numbers are spoken properly** in EN/DE/RU/UK — years, dates, times, prices, percentages, ordinals, version strings — with Slavic gender/case agreement ("в 2024 году" → "в две тысячи двадцать четвёртом году", "2 книги" → "дві книги"). Toggle in Settings.
@@ -115,8 +115,8 @@ pip install -r requirements-dev.txt
 winget install JRSoftware.InnoSetup      # only needed for -Installer
 
 # build
-.\scripts\build_windows.ps1              # -> dist\Utter\Utter.exe  +  dist\Utter-0.2.0-portable.zip
-.\scripts\build_windows.ps1 -Installer   # -> also dist\Utter-0.2.0-Setup.exe
+.\scripts\build_windows.ps1              # -> dist\Utter\Utter.exe  +  dist\Utter-3.0.0-portable.zip
+.\scripts\build_windows.ps1 -Installer   # -> also dist\Utter-3.0.0-Setup.exe
 ```
 
 The script runs the unit tests first (skip with `-SkipTests`), then `pyinstaller packaging\utter.spec`, zips the
@@ -134,13 +134,13 @@ and attaches `Utter-<ver>-Setup.exe` and `Utter-<ver>-portable-win64.zip` to a G
 ```powershell
 # bump version in pyproject.toml and src/utter/__init__.py, update CHANGELOG.md, then:
 git add -A
-git commit -m "v0.2.0"
-git tag v0.2.0
+git commit -m "v3.0.0"
+git tag v3.0.0
 git push && git push --tags
 ```
 
 The first push of a fresh repo: `gh repo create SwitchmanPlay/utter --public --source=. --push`.
-If you built locally instead: `gh release create v0.2.0 dist\Utter-0.2.0-Setup.exe dist\Utter-0.2.0-portable.zip --notes-file CHANGELOG.md`.
+If you built locally instead: `gh release create v3.0.0 dist\Utter-3.0.0-Setup.exe dist\Utter-3.0.0-portable.zip --notes-file CHANGELOG.md`.
 
 ## How "read selection" works
 
@@ -180,7 +180,7 @@ python -m pytest -q tests
 The tests cover the pure-Python parts (text cleaning, number verbalisation in four languages, chunking,
 language detection, settings, model registry, hotkey parsing) and need no Qt, models or audio device.
 
-## Known gaps (v0.2.0)
+## Known gaps (v3.0.0)
 
 - Pocket TTS and Kitten TTS entries follow the sherpa-onnx ≥ 1.12.20 Python API and the `tts-models` release
   archive names as documented, but were added without a Windows box in the loop. If one fails to load,
@@ -189,8 +189,8 @@ language detection, settings, model registry, hotkey parsing) and need no Qt, mo
   space, model numbers like "RTX4060") are read literally. Turn it off in Settings if it gets in your way.
 - Language auto-detection is a script + stop-word heuristic tuned for EN/DE/UK/RU. Fix the language in the
   combo box for anything exotic.
-- Bringing the main window to the front from the mini player uses the standard Win32 foreground workaround;
-  on some setups Windows only flashes the taskbar button instead.
+- Bringing the main window to the front from the mini player uses the Win32 foreground workarounds (Alt tap,
+  then AttachThreadInput). Should work everywhere now; if Windows still only flashes the taskbar button, open an issue.
 - Windows only for now. macOS/Linux mostly work in principle (Qt + sherpa-onnx are cross-platform) but
   autostart, the installer and the `Ctrl+C` trick are Windows-specific.
 

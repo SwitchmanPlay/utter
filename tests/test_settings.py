@@ -31,3 +31,22 @@ def test_from_dict_clamps_and_ignores_unknown():
     d = s.to_dict()
     json.dumps(d)  # serialisable
     assert "bogus" not in d
+
+
+def test_overlay_position_roundtrip(tmp_path, monkeypatch):
+    monkeypatch.setenv("UTTER_HOME", str(tmp_path))
+    s = Settings()
+    s.overlay_follow_cursor = False
+    s.overlay_pos = [120, 340]
+    s.save()
+    loaded = Settings.load()
+    assert loaded.overlay_follow_cursor is False
+    assert loaded.overlay_pos == [120, 340]
+
+
+def test_overlay_position_is_validated():
+    assert Settings.from_dict({"overlay_pos": "nope"}).overlay_pos == []
+    assert Settings.from_dict({"overlay_pos": [1]}).overlay_pos == []
+    assert Settings.from_dict({"overlay_pos": [1.7, "2"]}).overlay_pos == [1, 2]
+    assert Settings.from_dict({"overlay_pos": None}).overlay_pos == []
+    assert Settings.from_dict({"read_urls_as": "garbage"}).read_urls_as == "link"

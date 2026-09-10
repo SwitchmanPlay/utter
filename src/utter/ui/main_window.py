@@ -37,15 +37,33 @@ def _force_foreground(widget: QWidget) -> None:
         import ctypes
 
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
         hwnd = int(widget.winId())
-        SW_RESTORE, VK_MENU, KEYEVENTF_KEYUP = 9, 0x12, 0x0002
-        if user32.IsIconic(hwnd):
-            user32.ShowWindow(hwnd, SW_RESTORE)
-        # Simulated Alt tap grants us permission to steal the foreground.
+        SW_RESTORE, SW_SHOW, VK_MENU, KEYEVENTF_KEYUP = 9, 5, 0x12, 0x0002
+        user32.ShowWindow(hwnd, SW_RESTORE if user32.IsIconic(hwnd) else SW_SHOW)
+        if user32.GetForegroundWindow() == hwnd:
+            return
+        # 1) Simulated Alt tap grants us permission to steal the foreground.
         user32.keybd_event(VK_MENU, 0, 0, 0)
         user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
         user32.SetForegroundWindow(hwnd)
         user32.BringWindowToTop(hwnd)
+        if user32.GetForegroundWindow() == hwnd:
+            return
+        # 2) Fallback: borrow the input queue of the current foreground thread. Needed on
+        #    recent Windows builds where the Alt trick alone is ignored (window only blinked
+        #    in the taskbar instead of coming up).
+        fg = user32.GetForegroundWindow()
+        fg_tid = user32.GetWindowThreadProcessId(fg, None) if fg else 0
+        my_tid = kernel32.GetCurrentThreadId()
+        attached = bool(fg_tid) and fg_tid != my_tid and user32.AttachThreadInput(my_tid, fg_tid, True)
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetFocus(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(my_tid, fg_tid, False)
     except Exception:  # pragma: no cover - best effort only
         pass
 
@@ -424,10 +442,17 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.show()
+        self.setWindowState(
+            (self.windowState() & ~Qt.WindowState.WindowMinimized) | Qt.WindowState.WindowActive
+        )
         self.raise_()
         self.activateWindow()
         _force_foreground(self)
-        self.text.setFocus()
+        # Qt caches the activation state; ask again after the Win32 call so the text pad
+        # really has keyboard focus when the window comes up via hotkey/tray.
+        self.raise_()
+        self.activateWindow()
+        self.text.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def force_quit(self) -> None:
         self._force_quit = True

@@ -3,7 +3,7 @@
 
 #define MyAppName "Utter"
 #ifndef MyAppVersion
-  #define MyAppVersion "0.2.0"
+  #define MyAppVersion "3.0.0"
 #endif
 #define MyAppPublisher "Danylo Prokhorenko"
 #define MyAppURL "https://github.com/SwitchmanPlay/utter"

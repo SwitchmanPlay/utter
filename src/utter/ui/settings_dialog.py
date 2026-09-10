@@ -223,8 +223,16 @@ class SettingsDialog(QDialog):
         self.cb_start_min.setChecked(s.start_minimized)
         self.cb_close_tray = QCheckBox("Closing the window keeps Utter running in the tray")
         self.cb_close_tray.setChecked(s.close_to_tray)
-        self.cb_overlay = QCheckBox("Show the mini player near the cursor while speaking")
+        self.cb_overlay = QCheckBox("Show the mini player while speaking")
         self.cb_overlay.setChecked(s.show_overlay)
+        self.cb_overlay_follow = QCheckBox("Mini player appears next to the cursor (uncheck to keep it where you dragged it)")
+        self.cb_overlay_follow.setChecked(s.overlay_follow_cursor)
+        self.cb_overlay_follow.setToolTip(
+            "You can always drag the mini player by its text. With this off it stays at the spot you\n"
+            "dropped it, also after a restart. With this on every new read moves it back to the cursor."
+        )
+        self.cb_overlay_follow.setEnabled(s.show_overlay)
+        self.cb_overlay.toggled.connect(self.cb_overlay_follow.setEnabled)
         self.cb_markdown = QCheckBox("Strip Markdown (##, **, `code`, links) before reading")
         self.cb_markdown.setChecked(s.strip_markdown)
         self.cb_numbers = QCheckBox("Read numbers, dates, prices and % as words in the sentence's language")
@@ -239,7 +247,7 @@ class SettingsDialog(QDialog):
         self.cmb_urls.setCurrentIndex(max(0, self.cmb_urls.findData(s.read_urls_as)))
         for cb in (
             self.cb_autostart, self.cb_start_min, self.cb_close_tray, self.cb_overlay,
-            self.cb_markdown, self.cb_numbers,
+            self.cb_overlay_follow, self.cb_markdown, self.cb_numbers,
         ):
             form.addRow(cb)
         form.addRow("URLs in text:", self.cmb_urls)
@@ -251,7 +259,7 @@ class SettingsDialog(QDialog):
         form.addRow("CPU threads:", self.sp_threads)
 
         self.sp_steps = QSpinBox()
-        self.sp_steps.setRange(2, 32)
+        self.sp_steps.setRange(1, 32)
         self.sp_steps.setValue(s.num_steps)
         self.sp_steps.setToolTip(
             "Supertonic and Pocket TTS only. Fewer steps = faster, more = slightly higher quality. Default 8."
@@ -365,6 +373,7 @@ class SettingsDialog(QDialog):
         s.start_minimized = self.cb_start_min.isChecked()
         s.close_to_tray = self.cb_close_tray.isChecked()
         s.show_overlay = self.cb_overlay.isChecked()
+        s.overlay_follow_cursor = self.cb_overlay_follow.isChecked()
         s.strip_markdown = self.cb_markdown.isChecked()
         s.verbalize_numbers = self.cb_numbers.isChecked()
         s.reference_audio = self.ed_reference.text().strip()
