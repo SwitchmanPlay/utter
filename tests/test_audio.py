@@ -2,7 +2,7 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from utter.tts.speaker import squash_silence  # noqa: E402
+from utter.tts.audio import squash_silence  # noqa: E402
 
 
 def test_squash_silence_shortens_long_gaps_only():

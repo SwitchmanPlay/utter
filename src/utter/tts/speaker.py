@@ -18,6 +18,7 @@ from PySide6.QtCore import QObject, Signal
 
 from utter.models.registry import ModelSpec
 from utter.settings import Settings
+from utter.tts.audio import squash_silence
 from utter.tts.engine import Audio, EngineCache, EngineError
 from utter.tts.numbers import normalize_numbers
 from utter.tts.text import assign_languages, chunk_sentences, clean_text, halve_text, split_sentences
@@ -123,39 +124,6 @@ def synthesize_robust(engine, text: str, lang: str, settings: Settings, *, depth
             if parts:
                 return Audio(np.concatenate(parts), sr)
     return audio
-
-
-def squash_silence(
-    samples: np.ndarray,
-    sample_rate: int,
-    *,
-    max_gap: float = 0.7,
-    keep: float = 0.35,
-    threshold: float = 0.0035,
-) -> np.ndarray:
-    """Shorten every stretch of near-silence longer than `max_gap` seconds to `keep` seconds.
-
-    Diffusion TTS (Supertonic) sometimes emits seconds of dead air inside one utterance;
-    on top of that the tail of each chunk is often padded with silence. Both made Utter
-    sound like it "went quiet and then woke up". Speech itself is untouched.
-    """
-    if sample_rate <= 0 or samples.size < int(sample_rate * max_gap):
-        return samples
-    quiet = np.abs(samples) < threshold
-    edges = np.flatnonzero(np.diff(quiet.astype(np.int8)))
-    starts = np.concatenate(([0], edges + 1))
-    ends = np.concatenate((edges + 1, [quiet.size]))
-    max_len = int(sample_rate * max_gap)
-    keep_n = int(sample_rate * keep)
-    pieces: list[np.ndarray] = []
-    cut = False
-    for a, b in zip(starts, ends):
-        if quiet[a] and (b - a) > max_len:
-            pieces.append(samples[a : a + keep_n])
-            cut = True
-        else:
-            pieces.append(samples[a:b])
-    return np.concatenate(pieces) if cut else samples
 
 
 class _AudioBuffer:
