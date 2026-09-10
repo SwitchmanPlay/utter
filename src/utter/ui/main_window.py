@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from utter import APP_NAME, REPO_URL, __version__
-from utter.models.registry import MODELS, ModelSpec, get_model, installed_models
+from utter.models.registry import ModelSpec, get_model, installed_models
 from utter.settings import SPEED_MAX, SPEED_MIN, Settings
 from utter.tts import speaker as spk
 

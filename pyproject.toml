@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "utter"
-version = "3.0.0"
+version = "3.0.1"
 description = "Select it. Hear it. Any text on your screen, spoken aloud by local neural voices. 100% offline."
 readme = "README.md"
 license = { text = "MIT" }

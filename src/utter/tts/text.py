@@ -177,6 +177,47 @@ def chunk_text(text: str, *, max_chars: int = 280, min_chars: int = 40) -> list[
     return chunks
 
 
+def chunk_sentences(
+    sentences: list[str],
+    langs: list[str],
+    *,
+    max_chars: int = 280,
+    min_chars: int = 40,
+) -> tuple[list[str], list[str]]:
+    """Group already-prepared sentences into chunks without crossing a language boundary.
+
+    Returns (chunks, langs) of equal length. Sentences arrive *after* number verbalisation,
+    so `max_chars` is the real length the engine will see (v0.2 measured the chunk before
+    expanding numbers, and "12.05.2026" -> "дванадцятого травня дві тисячі двадцять шостого
+    року" pushed Supertonic chunks past what the model can voice; it then went silent or
+    skipped the tail).
+    """
+    chunks: list[str] = []
+    out_langs: list[str] = []
+    i = 0
+    while i < len(sentences):
+        lang = langs[i] if i < len(langs) else "en"
+        j = i
+        while j < len(sentences) and (langs[j] if j < len(langs) else "en") == lang:
+            j += 1
+        for chunk in chunk_text("\n".join(sentences[i:j]), max_chars=max_chars, min_chars=min_chars):
+            chunks.append(chunk)
+            out_langs.append(lang)
+        i = j
+    return chunks, out_langs
+
+
+def halve_text(text: str) -> list[str]:
+    """Split `text` into two (or more) pieces near the middle, preferring punctuation, then
+    whitespace. Used when the engine voiced a chunk implausibly short."""
+    text = text.strip()
+    if len(text) < 2:
+        return [text] if text else []
+    target = max(len(text) // 2 + 1, 12)
+    pieces = _split_long(text, target)
+    return [p for p in pieces if p] if len(pieces) > 1 else [text]
+
+
 def _split_long(sent: str, max_chars: int) -> list[str]:
     pieces = re.split(r"(?<=[,;:—–])\s+", sent)
     out: list[str] = []

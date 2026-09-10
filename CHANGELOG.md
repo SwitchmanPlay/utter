@@ -1,5 +1,28 @@
 # Changelog
 
+## 3.0.1 — 2026-09-10
+
+Fixes the 31-language model (Supertonic) going silent and skipping text. English-only models were not affected.
+
+### What was wrong
+- 0.2.0 started expanding numbers into words ("12.05.2026" -> "дванадцятого травня дві тисячі двадцять шостого року")
+  *after* the text had been cut into chunks of up to 280 characters. The chunk the engine actually received could be
+  400+ characters long. Supertonic has a hard budget per call (its own reference code chunks at 300); past that the
+  duration predictor saturates, the model voices the beginning, emits dead air and drops the rest. Cyrillic text with
+  dates, prices or years hit this constantly; English almost never did, which is why Kokoro/Kitten sounded fine.
+- Chunks could mix two languages (an English sentence merged with a Ukrainian one) but were sent with one language tag.
+
+### What changed
+- New pipeline order: clean -> sentences -> language per sentence -> numbers to words -> chunk. Chunk length is now
+  measured on the text the model really gets, and a chunk never crosses a language boundary.
+- Per-family chunk budget: Supertonic 190 chars, Pocket 220, everything else 280 (`MAX_CHARS_BY_FAMILY`).
+- Safety net: if the engine returns audio that is implausibly short for the text (< 0.028 s per letter), the chunk
+  is re-synthesised in halves and joined, up to three levels deep. Logged as a warning so you can see it happen.
+- Dead-air squash: any stretch of near-silence longer than 0.7 s inside one chunk is shortened to 0.35 s
+  (Supertonic sometimes pads or inserts seconds of silence). Speech is untouched.
+- Save WAV uses the same pipeline.
+- Tests: language-boundary chunking, post-expansion chunk length, halve_text, squash_silence.
+
 ## 3.0.0 — 2026-09-09
 
 Bug-fix release. No new models; the mini player, the speaker pipeline and the hotkeys got the attention.

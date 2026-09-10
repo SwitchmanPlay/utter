@@ -19,8 +19,8 @@ from PySide6.QtCore import QObject, Signal
 from utter.models.registry import ModelSpec
 from utter.settings import Settings
 from utter.tts.engine import Audio, EngineCache, EngineError
-from utter.tts.text import assign_languages, chunk_text, clean_text
 from utter.tts.numbers import normalize_numbers
+from utter.tts.text import assign_languages, chunk_sentences, clean_text, halve_text, split_sentences
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +60,102 @@ def prepare_chunk(chunk: str, lang: str, settings: Settings) -> str:
     if getattr(settings, "verbalize_numbers", True):
         chunk = normalize_numbers(chunk, lang)
     return chunk
+
+
+# Longest text one engine call may receive, measured *after* number verbalisation.
+# Supertonic (the 31-language model) has a hard ceiling on utterance length: past roughly
+# 300 characters the duration predictor saturates and the model voices the first part,
+# then produces silence and drops the rest. Its reference implementation chunks at 300;
+# we stay well below because Cyrillic number words are long.
+MAX_CHARS_BY_FAMILY = {"supertonic": 190, "pocket": 220}
+DEFAULT_MAX_CHARS = 280
+
+# Below this many seconds per letter/digit the engine cannot have voiced the whole chunk
+# (normal speech is ~0.06-0.08 s per character at 1x). Used to detect dropped text.
+MIN_SECONDS_PER_CHAR = 0.028
+
+
+def plan_job(text: str, spec: ModelSpec, settings: Settings) -> tuple[list[str], list[str]]:
+    """clean -> sentences -> language per sentence -> numbers to words -> chunks.
+
+    Order matters: languages are decided on the original sentence (digits carry no language),
+    numbers are expanded *before* chunking so chunk lengths are real, and chunks never mix
+    two languages (one Supertonic call = one language tag).
+    """
+    cleaned = clean_text(text, strip_markdown=settings.strip_markdown, urls=settings.read_urls_as)
+    sentences = split_sentences(cleaned)
+    if not sentences:
+        return [], []
+    langs = plan_languages(sentences, spec, settings)
+    spoken = [prepare_chunk(sent, lang, settings) for sent, lang in zip(sentences, langs)]
+    max_chars = MAX_CHARS_BY_FAMILY.get(spec.family, DEFAULT_MAX_CHARS)
+    return chunk_sentences(spoken, langs, max_chars=max_chars, min_chars=min(40, max_chars // 2))
+
+
+def synthesize_robust(engine, text: str, lang: str, settings: Settings, *, depth: int = 0) -> Audio:
+    """engine.synthesize() with a sanity check: if the audio is far too short for the text
+    (engine skipped or truncated it), re-synthesise the chunk in halves and join them."""
+    audio: Audio = engine.synthesize(
+        text,
+        speaker_id=settings.speaker_id,
+        speed=settings.speed,
+        lang=lang,
+        num_steps=settings.num_steps,
+        reference_audio=settings.reference_audio,
+    )
+    letters = sum(1 for ch in text if ch.isalnum())
+    expected_min = letters * MIN_SECONDS_PER_CHAR / max(float(settings.speed), 0.5)
+    if depth < 3 and letters >= 24 and audio.duration < expected_min:
+        pieces = halve_text(text)
+        if len(pieces) > 1:
+            log.warning(
+                "engine voiced %.2fs for %d chars (expected >= %.2fs); retrying in %d pieces: %r",
+                audio.duration, letters, expected_min, len(pieces), text[:60],
+            )
+            parts: list[np.ndarray] = []
+            sr = audio.sample_rate or engine.sample_rate or 24000
+            for piece in pieces:
+                a = synthesize_robust(engine, piece, lang, settings, depth=depth + 1)
+                if a.samples.size:
+                    sr = a.sample_rate or sr
+                    parts.append(a.samples)
+                    parts.append(np.zeros(int(sr * 0.06), dtype=np.float32))
+            if parts:
+                return Audio(np.concatenate(parts), sr)
+    return audio
+
+
+def squash_silence(
+    samples: np.ndarray,
+    sample_rate: int,
+    *,
+    max_gap: float = 0.7,
+    keep: float = 0.35,
+    threshold: float = 0.0035,
+) -> np.ndarray:
+    """Shorten every stretch of near-silence longer than `max_gap` seconds to `keep` seconds.
+
+    Diffusion TTS (Supertonic) sometimes emits seconds of dead air inside one utterance;
+    on top of that the tail of each chunk is often padded with silence. Both made Utter
+    sound like it "went quiet and then woke up". Speech itself is untouched.
+    """
+    if sample_rate <= 0 or samples.size < int(sample_rate * max_gap):
+        return samples
+    quiet = np.abs(samples) < threshold
+    edges = np.flatnonzero(np.diff(quiet.astype(np.int8)))
+    starts = np.concatenate(([0], edges + 1))
+    ends = np.concatenate((edges + 1, [quiet.size]))
+    max_len = int(sample_rate * max_gap)
+    keep_n = int(sample_rate * keep)
+    pieces: list[np.ndarray] = []
+    cut = False
+    for a, b in zip(starts, ends):
+        if quiet[a] and (b - a) > max_len:
+            pieces.append(samples[a : a + keep_n])
+            cut = True
+        else:
+            pieces.append(samples[a:b])
+    return np.concatenate(pieces) if cut else samples
 
 
 class _AudioBuffer:
@@ -143,12 +239,10 @@ class Speaker(QObject):
         thread on the Qt thread, which froze the UI for up to 2 s when a hotkey was pressed
         while a long chunk was being synthesised.)
         """
-        cleaned = clean_text(text, strip_markdown=settings.strip_markdown, urls=settings.read_urls_as)
-        chunks = chunk_text(cleaned)
+        chunks, langs = plan_job(text, spec, settings)
         if not chunks:
             return False
-        langs = plan_languages(chunks, spec, settings)
-        job = _Job(text=cleaned, spec=spec, settings=settings, chunks=chunks, langs=langs)
+        job = _Job(text=" ".join(chunks), spec=spec, settings=settings, chunks=chunks, langs=langs)
         with self._lock:
             prev_job, prev_thread = self._job, self._thread
             if prev_job is not None:
@@ -287,23 +381,21 @@ class Speaker(QObject):
                 if job.stop.is_set():
                     break
                 lang = job.langs[idx - 1] if idx - 1 < len(job.langs) else "en"
-                spoken = prepare_chunk(chunk, lang, s)
                 t0 = time.perf_counter()
-                audio: Audio = engine.synthesize(
-                    spoken,
-                    speaker_id=s.speaker_id,
-                    speed=s.speed,
-                    lang=lang,
-                    num_steps=s.num_steps,
-                    reference_audio=s.reference_audio,
-                )
+                audio = synthesize_robust(engine, chunk, lang, s)
                 synth_s = time.perf_counter() - t0
                 if job.stop.is_set():
                     break
                 if audio.samples.size == 0:
-                    log.warning("empty audio for chunk %d", idx)
+                    log.warning("empty audio for chunk %d: %r", idx, chunk[:80])
                     continue
-                samples = audio.samples * gain if gain != 1.0 else audio.samples
+                samples = squash_silence(audio.samples, audio.sample_rate)
+                if samples.size < audio.samples.size:
+                    log.debug(
+                        "chunk %d: squashed %.2fs of dead air",
+                        idx, (audio.samples.size - samples.size) / float(audio.sample_rate),
+                    )
+                samples = samples * gain if gain != 1.0 else samples
                 if gain > 1.0:
                     samples = np.clip(samples, -1.0, 1.0)
 

@@ -115,8 +115,8 @@ pip install -r requirements-dev.txt
 winget install JRSoftware.InnoSetup      # only needed for -Installer
 
 # build
-.\scripts\build_windows.ps1              # -> dist\Utter\Utter.exe  +  dist\Utter-3.0.0-portable.zip
-.\scripts\build_windows.ps1 -Installer   # -> also dist\Utter-3.0.0-Setup.exe
+.\scripts\build_windows.ps1              # -> dist\Utter\Utter.exe  +  dist\Utter-3.0.1-portable.zip
+.\scripts\build_windows.ps1 -Installer   # -> also dist\Utter-3.0.1-Setup.exe
 ```
 
 The script runs the unit tests first (skip with `-SkipTests`), then `pyinstaller packaging\utter.spec`, zips the
@@ -134,13 +134,13 @@ and attaches `Utter-<ver>-Setup.exe` and `Utter-<ver>-portable-win64.zip` to a G
 ```powershell
 # bump version in pyproject.toml and src/utter/__init__.py, update CHANGELOG.md, then:
 git add -A
-git commit -m "v3.0.0"
-git tag v3.0.0
+git commit -m "v3.0.1"
+git tag v3.0.1
 git push && git push --tags
 ```
 
 The first push of a fresh repo: `gh repo create SwitchmanPlay/utter --public --source=. --push`.
-If you built locally instead: `gh release create v3.0.0 dist\Utter-3.0.0-Setup.exe dist\Utter-3.0.0-portable.zip --notes-file CHANGELOG.md`.
+If you built locally instead: `gh release create v3.0.1 dist\Utter-3.0.1-Setup.exe dist\Utter-3.0.1-portable.zip --notes-file CHANGELOG.md`.
 
 ## How "read selection" works
 
@@ -180,7 +180,7 @@ python -m pytest -q tests
 The tests cover the pure-Python parts (text cleaning, number verbalisation in four languages, chunking,
 language detection, settings, model registry, hotkey parsing) and need no Qt, models or audio device.
 
-## Known gaps (v3.0.0)
+## Known gaps (v3.0.1)
 
 - Pocket TTS and Kitten TTS entries follow the sherpa-onnx ≥ 1.12.20 Python API and the `tts-models` release
   archive names as documented, but were added without a Windows box in the loop. If one fails to load,

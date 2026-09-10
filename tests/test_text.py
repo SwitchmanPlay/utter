@@ -96,3 +96,31 @@ def test_assign_languages_switches_on_script_change():
 def test_assign_languages_clamps_to_model_languages():
     langs = assign_languages(["Bonjour tout le monde, comment allez-vous?"], default="en", allowed=("en", "de"))
     assert langs == ["en"]
+
+
+from utter.tts.text import chunk_sentences, halve_text  # noqa: E402
+
+
+def test_chunk_sentences_never_mixes_languages():
+    sents = ["Hello there, how are you doing today my friend.", "Привіт, як справи сьогодні друже.", "Fine."]
+    langs = ["en", "uk", "en"]
+    chunks, out = chunk_sentences(sents, langs, max_chars=280, min_chars=40)
+    assert len(chunks) == len(out) == 3
+    assert out == ["en", "uk", "en"]
+    assert "Привіт" in chunks[1] and "Hello" not in chunks[1]
+
+
+def test_chunk_sentences_respects_max_chars_after_expansion():
+    long_sent = " ".join(["дві тисячі двадцять шостого року"] * 12)  # ~390 chars, one sentence
+    chunks, out = chunk_sentences([long_sent], ["uk"], max_chars=190, min_chars=40)
+    assert len(chunks) >= 2
+    assert all(len(c) <= 190 for c in chunks)
+    assert set(out) == {"uk"}
+
+
+def test_halve_text_splits_near_middle():
+    t = "one two three four five six seven eight nine ten eleven twelve"
+    parts = halve_text(t)
+    assert len(parts) >= 2
+    assert " ".join(parts) == t
+    assert halve_text("x") == ["x"]

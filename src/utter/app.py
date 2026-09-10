@@ -296,26 +296,19 @@ class UtterApp(QObject):
                 import numpy as np
 
                 from utter.tts.engine import Audio
-                from utter.tts.speaker import plan_languages, prepare_chunk, write_wav
-                from utter.tts.text import chunk_text, clean_text
+                from utter.tts.speaker import plan_job, squash_silence, synthesize_robust, write_wav
 
                 eng = self.engines.get(spec, s.num_threads)
                 eng.load()
                 parts = []
                 sr = 0
-                chunks = chunk_text(clean_text(text, strip_markdown=s.strip_markdown, urls=s.read_urls_as))
-                for chunk, lang in zip(chunks, plan_languages(chunks, spec, s)):
-                    spoken = prepare_chunk(chunk, lang, s)
-                    a = eng.synthesize(
-                        spoken,
-                        speaker_id=s.speaker_id,
-                        speed=s.speed,
-                        lang=lang,
-                        num_steps=s.num_steps,
-                        reference_audio=s.reference_audio,
-                    )
+                chunks, langs = plan_job(text, spec, s)
+                for chunk, lang in zip(chunks, langs):
+                    a = synthesize_robust(eng, chunk, lang, s)
+                    if a.samples.size == 0:
+                        continue
                     sr = a.sample_rate
-                    parts.append(a.samples)
+                    parts.append(squash_silence(a.samples, sr))
                     parts.append(np.zeros(int(sr * 0.12), dtype=np.float32))
                 if not parts:
                     raise RuntimeError("nothing to synthesize")
