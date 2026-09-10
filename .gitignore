@@ -11,5 +11,5 @@ venv/
 *.wav
 *.log
 # model weights are downloaded into %APPDATA%\Utter\models at runtime, never committed
-models/
+/models/
 packaging/Output/

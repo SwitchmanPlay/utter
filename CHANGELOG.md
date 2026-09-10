@@ -2,6 +2,13 @@
 
 ## 3.0.1 — 2026-09-10
 
+### Repo / CI (source only, binaries unchanged)
+- `.gitignore` had `models/`, which also hid `src/utter/models/` from git. The package was never pushed, so every CI run
+  since 0.1.0 died with `ModuleNotFoundError: No module named 'utter.models'`. Now `/models/` (repo root only).
+- Ruff rule set pinned to `E4, E7, E9, F` in `pyproject.toml`; the unpinned latest ruff on CI flagged 52 style-only
+  items that are not errors.
+- Removed `.github/workflows/release.yml`. Builds are done locally, releases are uploaded with `gh release create`.
+
 Fixes the 31-language model (Supertonic) going silent and skipping text. English-only models were not affected.
 
 ### What was wrong
