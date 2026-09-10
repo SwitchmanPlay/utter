@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+*.wav
+*.log
+# model weights are downloaded into %APPDATA%\Utter\models at runtime, never committed
+models/
+packaging/Output/
